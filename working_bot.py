@@ -1,10 +1,11 @@
-"""
-РАБОЧИЙ БОТ ДЛЯ ПЛАВАНИЯ - FITSWIM AI ПОМОЩНИК
-"""
-
+import os
 import logging
 import random
 from datetime import datetime, timedelta
+from flask import Flask
+from threading import Thread
+
+# ===== ИМПОРТЫ TELEGRAM =====
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -16,15 +17,16 @@ from telegram.ext import (
     ConversationHandler
 )
 
-# Настройка логирования
+# ===== НАСТРОЙКА LOGGING =====
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ТОКЕН БОТА
-BOT_TOKEN = "8550408293:AAFeyT1kA8jOA-7-Ubr8JJPawu4hgXYm2Q4"
+# ===== КОНФИГУРАЦИЯ =====
+# ТОКЕН из переменных окружения (Render Environment Variables)
+BOT_TOKEN = os.environ.get('BOT_TOKEN', '8550408293:AAFeyT1kA8jOA-7-Ubr8JJPawu4hgXYm2Q4')
 
 # Состояния для ConversationHandler
 CHOOSING_DAY, CHOOSING_TIME = range(2)
@@ -33,6 +35,48 @@ CHOOSING_DAY, CHOOSING_TIME = range(2)
 user_trainings = {}
 user_reminders = {}
 
+# ===== FLASK ДЛЯ HEALTH CHECK =====
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>FitSwim AI Помощник</title>
+        <style>
+            body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+            h1 { color: #2E86C1; }
+            .status { color: green; font-weight: bold; }
+        </style>
+    </head>
+    <body>
+        <h1>🏊‍♂️ FitSwim AI Помощник</h1>
+        <p class="status">✅ Бот успешно работает на Render!</p>
+        <p>Бот для записывания тренировок и напоминаний о плавании</p>
+        <p><a href="/health">Health Check</a> | <a href="/stats">Bot Stats</a></p>
+    </body>
+    </html>
+    """
+
+@app.route('/health')
+def health():
+    return {"status": "healthy", "timestamp": datetime.now().isoformat(), "bot": "running"}
+
+@app.route('/stats')
+def stats():
+    users = len(user_trainings)
+    trainings = sum(len(v) for v in user_trainings.values())
+    reminders = sum(len(v) for v in user_reminders.values())
+    return {
+        "users": users,
+        "trainings": trainings,
+        "reminders": reminders,
+        "active": True
+    }
+
+# ===== TELEGRAM БОТ =====
 # Команда /start
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
@@ -668,7 +712,7 @@ async def handle_regular_message(update: Update, context: ContextTypes.DEFAULT_T
     elif text == "💡 Совет по плаванию":
         tips = [
             "💡 *Разминка обязательна!* 5-10 минут перед плаванием предотвратят травмы.",
-            "💡 *Дыши правильно:* вдох ртом при повороте головы, выдох носом в воду.",
+            "💡 *Дыши правильно:* вдох ртом при повороте головы, выдох носом в воде.",
             "💡 *Пей воду* даже в бассейне. Плавание вызывает обезвоживание!",
             "💡 *Начни с брасса* - самый простой стиль для новичков.",
             "💡 *Используй очки* - защитят глаза и улучшат видимость.",
@@ -829,10 +873,9 @@ async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Бот установит напоминание на 1 минуту вперед."
     )
 
-# Главная функция
-def main():
-    """Запуск бота"""
-    
+# Функция для запуска Telegram бота
+async def run_telegram_bot():
+    """Запуск Telegram бота"""
     print("=" * 70)
     print("🤖 ЗАПУСК AI ПОМОЩНИКА FITSWIM")
     print("=" * 70)
@@ -901,18 +944,39 @@ def main():
         print("4. В меню напоминаний нажмите '➕ Установить напоминание'")
         print("5. Выберите день и время")
         print("6. Или для быстрого теста: /test_reminder")
-        print("\n🛑 Ctrl+C для остановки")
+        print("\n🌐 Веб-интерфейс доступен по адресу Render")
+        print("🛑 Бот будет автоматически перезапускаться при ошибках")
         print("=" * 70)
         
-        # Запускаем бота
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        # Запускаем бота с обработкой ошибок
+        await application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True
+        )
         
     except Exception as e:
         print(f"\n❌ ОШИБКА ЗАПУСКА: {e}")
-        print("\nПопробуйте:")
-        print("1. Перезапустить бота")
-        print("2. Проверить интернет соединение")
-        print("3. Написать /start в боте")
+        print("🔄 Перезапуск через 10 секунд...")
+        import asyncio
+        await asyncio.sleep(10)
+        await run_telegram_bot()  # Рекурсивный перезапуск
+
+# Главная функция для запуска всего
+def main():
+    """Запуск Flask и Telegram бота в отдельных потоках"""
+    
+    # Запускаем Flask в отдельном потоке
+    def run_flask():
+        port = int(os.environ.get('PORT', 10000))
+        print(f"🌐 Запуск Flask на порту {port}")
+        app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    
+    flask_thread = Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    # Запускаем Telegram бота в основном потоке
+    import asyncio
+    asyncio.run(run_telegram_bot())
 
 if __name__ == '__main__':
     main()
