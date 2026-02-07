@@ -7,9 +7,8 @@ import os
 import logging
 import random
 import asyncio
+import sys
 from datetime import datetime, timedelta
-from threading import Thread
-from flask import Flask
 
 # ===== ИМПОРТЫ TELEGRAM =====
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
@@ -26,7 +25,11 @@ from telegram.ext import (
 # ===== НАСТРОЙКА ЛОГИРОВАНИЯ =====
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    handlers=[
+        logging.StreamHandler(sys.stdout),  # Для Render логов
+        logging.FileHandler('bot.log')      # Для файла логов
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -41,121 +44,60 @@ CHOOSING_DAY, CHOOSING_TIME = range(2)
 user_trainings = {}
 user_reminders = {}
 
-# ===== FLASK ДЛЯ HEALTH CHECK =====
-flask_app = Flask(__name__)
-
-@flask_app.route('/')
-def home():
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>FitSwim AI Помощник</title>
-        <style>
-            body { 
-                font-family: Arial, sans-serif; 
-                text-align: center; 
-                padding: 50px; 
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-                min-height: 100vh;
-                display: flex;
-                flex-direction: column;
-                justify-content: center;
-                align-items: center;
-            }
-            .container {
-                background: rgba(255, 255, 255, 0.1);
-                backdrop-filter: blur(10px);
-                padding: 40px;
-                border-radius: 20px;
-                box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-                max-width: 600px;
-            }
-            h1 { 
-                color: #fff; 
-                font-size: 2.5em;
-                margin-bottom: 20px;
-            }
-            .status { 
-                color: #4ade80; 
-                font-weight: bold;
-                font-size: 1.2em;
-                margin: 20px 0;
-            }
-            .emoji {
-                font-size: 3em;
-                margin: 20px;
-            }
-            .links {
-                margin-top: 30px;
-            }
-            .links a {
-                color: #93c5fd;
-                text-decoration: none;
-                margin: 0 15px;
-                font-weight: bold;
-                transition: color 0.3s;
-            }
-            .links a:hover {
-                color: #fff;
-                text-decoration: underline;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="emoji">🏊‍♂️</div>
-            <h1>FitSwim AI Помощник</h1>
-            <div class="status">✅ Бот успешно работает на Render!</div>
-            <p>Telegram бот для отслеживания тренировок по плаванию</p>
-            <p>Функции: запись тренировок, статистика, напоминания, советы</p>
-            
-            <div class="links">
-                <a href="/health">Health Check</a> | 
-                <a href="/stats">Статистика бота</a> | 
-                <a href="https://t.me/fitswim_bot">Telegram бот</a>
-            </div>
-            
-            <div style="margin-top: 30px; font-size: 0.9em; opacity: 0.8;">
-                🚀 Работает на Render.com | Python + Telegram Bot API
-            </div>
-        </div>
-    </body>
-    </html>
-    """
-
-@flask_app.route('/health')
-def health():
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "service": "FitSwim AI Assistant",
-        "version": "1.0",
-        "telegram_bot": "running" if BOT_TOKEN else "not_configured",
-        "users_count": len(user_trainings),
-        "trainings_count": sum(len(v) for v in user_trainings.values()),
-        "reminders_count": sum(len(v) for v in user_reminders.values())
-    }
-
-@flask_app.route('/stats')
-def stats():
-    active_reminders = sum(
-        1 for user_reminders_list in user_reminders.values() 
-        for r in user_reminders_list 
-        if r.get('active', True)
-    )
+# ===== ПРОСТОЙ HTTP СЕРВЕР ДЛЯ HEALTH CHECK =====
+def start_http_server():
+    """Запускает простой HTTP сервер для health check"""
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    import threading
     
-    return {
-        "bot_name": "FitSwim AI Помощник",
-        "registered_users": len(user_trainings),
-        "total_trainings": sum(len(v) for v in user_trainings.values()),
-        "active_reminders": active_reminders,
-        "uptime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "status": "operational"
-    }
+    class HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == '/':
+                self.send_response(200)
+                self.send_header('Content-type', 'text/html')
+                self.end_headers()
+                html = """
+                <!DOCTYPE html>
+                <html>
+                <head><title>FitSwim Bot</title></head>
+                <body>
+                <h1>🏊‍♂️ FitSwim AI Помощник</h1>
+                <p>✅ Бот работает на Render!</p>
+                <p><a href="/health">Health Check</a></p>
+                </body>
+                </html>
+                """
+                self.wfile.write(html.encode())
+            elif self.path == '/health':
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                import json
+                response = {
+                    "status": "healthy",
+                    "timestamp": datetime.now().isoformat(),
+                    "service": "FitSwim Bot"
+                }
+                self.wfile.write(json.dumps(response).encode())
+            else:
+                self.send_response(404)
+                self.end_headers()
+        
+        def log_message(self, format, *args):
+            pass  # Отключаем логи запросов
+    
+    def run_server():
+        port = int(os.environ.get('PORT', 10000))
+        server = HTTPServer(('0.0.0.0', port), HealthHandler)
+        print(f"🌐 HTTP сервер запущен на порту {port}")
+        server.serve_forever()
+    
+    # Запускаем в отдельном потоке
+    server_thread = threading.Thread(target=run_server, daemon=True)
+    server_thread.start()
+    return server_thread
 
-# ===== ТЕЛЕГРАМ БОТ ФУНКЦИИ (Ваш оригинальный код без изменений) =====
+# ===== ТЕЛЕГРАМ БОТ ФУНКЦИИ (Ваш оригинальный код) =====
 
 # Команда /start
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -953,17 +895,10 @@ async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Бот установит напоминание на 1 минуту вперед."
     )
 
-# ===== ИСПРАВЛЕННЫЙ ЗАПУСК =====
+# ===== ИСПРАВЛЕННЫЙ ЗАПУСК ДЛЯ RENDER =====
 
-def run_flask_server():
-    """Запускает Flask сервер в отдельном потоке"""
-    print("🌐 Запуск Flask сервера для health check...")
-    port = int(os.environ.get('PORT', 10000))
-    print(f"✅ Flask запущен на порту: {port}")
-    flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-
-async def run_telegram_bot():
-    """Запускает Telegram бота"""
+def main():
+    """Главная функция запуска - исправленная для Render"""
     print("=" * 70)
     print("🤖 ЗАПУСК AI ПОМОЩНИКА FITSWIM")
     print("=" * 70)
@@ -975,10 +910,15 @@ async def run_telegram_bot():
     
     print(f"✅ Токен: {BOT_TOKEN[:10]}...")
     
+    # Запускаем простой HTTP сервер для health check
+    print("🌐 Запуск HTTP сервера для health check...")
+    http_thread = start_http_server()
+    print("✅ HTTP сервер запущен")
+    
     try:
-        # Создаем приложение
+        # Создаем приложение Telegram бота
         application = Application.builder().token(BOT_TOKEN).build()
-        print("✅ Приложение создано")
+        print("✅ Приложение Telegram создано")
         
         # Создаем ConversationHandler для напоминаний
         conv_handler = ConversationHandler(
@@ -1035,60 +975,17 @@ async def run_telegram_bot():
         print("\n🌐 Веб-интерфейс доступен по адресу Render")
         print("=" * 70)
         
-        # Запускаем бота
-        await application.run_polling(
+        # Запускаем бота - ПРОСТОЙ ВЫЗОВ БЕЗ ASYNCIO
+        print("\n🤖 Запуск Telegram бота...")
+        application.run_polling(
             allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True,
-            close_loop=False  # Важно: не закрываем event loop
+            drop_pending_updates=True
         )
         
     except Exception as e:
-        print(f"\n❌ ОШИБКА ЗАПУСКА TELEGRAM БОТА: {e}")
+        print(f"\n❌ ОШИБКА ЗАПУСКА: {e}")
         logger.error(f"Ошибка запуска бота: {e}", exc_info=True)
-        raise
-
-def main():
-    """Главная функция запуска"""
-    print("🚀 Инициализация FitSwim AI Помощника...")
-    
-    # Запускаем Flask в отдельном потоке
-    flask_thread = Thread(target=run_flask_server, daemon=True)
-    flask_thread.start()
-    
-    print("✅ Flask запущен в фоновом режиме")
-    
-    # Ждем немного для запуска Flask
-    import time
-    time.sleep(2)
-    
-    # Запускаем Telegram бота с перезапуском при ошибках
-    max_retries = 3
-    retry_count = 0
-    
-    while retry_count < max_retries:
-        try:
-            print(f"\n🔄 Запуск Telegram бота (попытка {retry_count + 1}/{max_retries})")
-            
-            # Создаем новый event loop для каждого запуска
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-            # Запускаем бота
-            loop.run_until_complete(run_telegram_bot())
-            
-        except KeyboardInterrupt:
-            print("\n👋 Остановка бота по запросу пользователя...")
-            break
-        except Exception as e:
-            retry_count += 1
-            print(f"\n⚠️ Бот упал с ошибкой: {e}")
-            
-            if retry_count < max_retries:
-                print(f"🔄 Перезапуск через 10 секунд... ({retry_count}/{max_retries})")
-                time.sleep(10)
-            else:
-                print("❌ Достигнут лимит перезапусков. Бот остановлен.")
-                break
+        print("\n🔄 Попробуйте перезапустить сервис в Render")
 
 if __name__ == '__main__':
     main()
